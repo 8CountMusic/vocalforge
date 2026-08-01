@@ -1,0 +1,84 @@
+name: Build VocalForge
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            cmake_extra: ""
+          - name: macOS (Intel + Apple Silicon)
+            os: macos-latest
+            cmake_extra: -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" -DCMAKE_OSX_DEPLOYMENT_TARGET=10.13
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.cmake_extra }}
+
+      - name: Build
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Collect plugin (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item -Recurse "build/VocalForge_artefacts/Release/VST3/VocalForge.vst3" out/
+
+      - name: Collect plugin (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p out
+          cp -R "build/VocalForge_artefacts/Release/VST3/VocalForge.vst3" out/
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: VocalForge-${{ runner.os }}-VST3
+          path: out
+
+  publish:
+    name: Publish plugins to builds branch
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Download built plugins
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Zip each plugin
+        run: |
+          mkdir -p out
+          cd dist
+          for d in */ ; do (cd "$d" && zip -r "../../out/${d%/}.zip" .) ; done
+          ls -la ../out
+
+      - name: Push zips to builds branch
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git checkout --orphan builds
+          git rm -rf --quiet . || true
+          cp out/*.zip .
+          echo "Build ${{ github.run_number }} — $(date -u)" > BUILD_INFO.txt
+          git add *.zip BUILD_INFO.txt
+          git commit -m "Built plugins (run ${{ github.run_number }})"
+          git push -f origin builds
