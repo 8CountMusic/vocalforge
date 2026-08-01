@@ -46,8 +46,9 @@ struct FixedDelay
 // synth carrier that follows MIDI notes or the detected vocal pitch.
 struct Vocoder
 {
-    static constexpr int numBands = 16;
-    static constexpr int noiseBandStart = 13; // top bands use noise for consonant clarity
+    static constexpr int numBands = 24;
+    static constexpr int noiseBandStart = 20; // top bands use noise for consonant clarity
+    static constexpr int maxVoices = 3;
 
     void prepare (const juce::dsp::ProcessSpec& spec)
     {
@@ -56,33 +57,45 @@ struct Vocoder
 
         for (int k = 0; k < numBands; ++k)
         {
-            const float f = 120.0f * std::pow (7000.0f / 120.0f, (float) k / (float) (numBands - 1));
+            const float f = 100.0f * std::pow (7800.0f / 100.0f, (float) k / (float) (numBands - 1));
             for (auto* filt : { &bandMod[(size_t) k], &bandCar[(size_t) k] })
             {
                 filt->prepare (monoSpec);
                 filt->setType (juce::dsp::StateVariableTPTFilterType::bandpass);
                 filt->setCutoffFrequency (f);
-                filt->setResonance (5.0f);
+                filt->setResonance (4.0f);
             }
-            env[(size_t) k].prepare (spec.sampleRate, 2.0f, 18.0f);
+            env[(size_t) k].prepare (spec.sampleRate, 4.0f, 35.0f);
         }
         carrierLP.prepare (monoSpec);
         carrierLP.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
         carrierLP.setResonance (0.5f);
+        gateEnv.prepare (spec.sampleRate, 2.0f, 80.0f);
+        levelIn.prepare (spec.sampleRate, 30.0f, 150.0f);
+        levelOut.prepare (spec.sampleRate, 30.0f, 150.0f);
+
+        // Portamento: ~30 ms glide keeps the carrier from lurching when the pitch detector updates.
+        glideAlpha = 1.0f - std::exp (-1.0f / (0.030f * (float) sampleRate));
         phases.fill (0.0f);
+        currentFreqs.fill (0.0f);
         reset();
     }
 
     void setCarrier (const std::vector<float>& freqs, float brightness01)
     {
-        carrierFreqs = freqs;
-        carrierLP.setCutoffFrequency (juce::jmap (brightness01, 2000.0f, 9000.0f));
+        if (! freqs.empty())              // hold the last pitch through consonants/gaps
+            targetFreqs = freqs;
+        carrierLP.setCutoffFrequency (juce::jmap (brightness01, 2500.0f, 9500.0f));
     }
 
     // modulator: time-aligned dry vocal. dest: wet output (all channels get the same signal).
     void process (const juce::AudioBuffer<float>& modulator, juce::AudioBuffer<float>& dest, int numCh, int n)
     {
-        const int voices = juce::jmin (3, (int) carrierFreqs.size());
+        const int voices = juce::jmax (1, juce::jmin (maxVoices, (int) targetFreqs.size()));
+
+        for (int v = 0; v < voices; ++v)
+            if (currentFreqs[(size_t) v] <= 0.0f)
+                currentFreqs[(size_t) v] = targetFreqs[(size_t) v]; // jump instantly on first note
 
         for (int i = 0; i < n; ++i)
         {
@@ -92,16 +105,23 @@ struct Vocoder
                 mod += modulator.getSample (ch, i);
             mod /= (float) juce::jmax (1, numCh);
 
-            // Carrier: stacked saws at the target pitches, gently low-passed
+            // Overall gate: silence in = silence out (no hiss between words)
+            const float g = juce::jlimit (0.0f, 1.0f, (gateEnv.process (mod) - 0.004f) * 120.0f);
+
+            // Carrier: each voice = two slightly detuned saws (richer, Vocodex-ish)
             float car = 0.0f;
             for (int v = 0; v < voices; ++v)
             {
-                auto& ph = phases[(size_t) v];
-                ph += carrierFreqs[(size_t) v] / (float) sampleRate;
-                if (ph >= 1.0f) ph -= 1.0f;
-                car += 2.0f * ph - 1.0f;
+                auto& f = currentFreqs[(size_t) v];
+                f += (targetFreqs[(size_t) v] - f) * glideAlpha;
+
+                auto& phA = phases[(size_t) (v * 2)];
+                auto& phB = phases[(size_t) (v * 2 + 1)];
+                phA += f * 0.9965f / (float) sampleRate; if (phA >= 1.0f) phA -= 1.0f;
+                phB += f * 1.0035f / (float) sampleRate; if (phB >= 1.0f) phB -= 1.0f;
+                car += (2.0f * phA - 1.0f) + (2.0f * phB - 1.0f);
             }
-            if (voices > 0) car /= (float) voices;
+            car /= (float) (voices * 2);
             car = carrierLP.processSample (0, car);
 
             const float noise = rng.nextFloat() * 2.0f - 1.0f;
@@ -111,11 +131,15 @@ struct Vocoder
             {
                 const float m = bandMod[(size_t) k].processSample (0, mod);
                 const float e = env[(size_t) k].process (m);
-                const float source = k >= noiseBandStart ? noise : car;
+                const float source = k >= noiseBandStart ? noise * 0.7f : car;
                 const float s = bandCar[(size_t) k].processSample (0, source);
                 out += s * e;
             }
-            out *= 4.5f; // makeup
+            // Level-match to the vocal so the vocoder follows its dynamics instead of railing.
+            const float eIn  = levelIn.process (mod);
+            const float eOut = levelOut.process (out);
+            out *= juce::jlimit (0.05f, 10.0f, eIn / juce::jmax (eOut, 1.0e-5f));
+            out = std::tanh (out * 1.3f) * 0.9f * g; // soft safety + gate
 
             for (int ch = 0; ch < numCh; ++ch)
                 dest.getWritePointer (ch)[i] = out;
@@ -131,15 +155,22 @@ struct Vocoder
             env[(size_t) k].reset();
         }
         carrierLP.reset();
+        gateEnv.reset();
+        levelIn.reset();
+        levelOut.reset();
         phases.fill (0.0f);
+        currentFreqs.fill (0.0f);
     }
 
     double sampleRate = 44100.0;
     std::array<juce::dsp::StateVariableTPTFilter<float>, numBands> bandMod, bandCar;
     std::array<EnvelopeFollower, numBands> env;
     juce::dsp::StateVariableTPTFilter<float> carrierLP;
-    std::array<float, 3> phases {};
-    std::vector<float> carrierFreqs { 110.0f };
+    EnvelopeFollower gateEnv, levelIn, levelOut;
+    std::array<float, maxVoices * 2> phases {};
+    std::array<float, maxVoices> currentFreqs {};
+    std::vector<float> targetFreqs { 110.0f };
+    float glideAlpha = 0.01f;
     juce::Random rng;
 };
 
@@ -178,6 +209,10 @@ struct CharacterEngine
 
         // Vocoder
         vocoder.prepare (spec);
+
+        // Grit level-matching envelopes
+        gritEnvIn.prepare (sampleRate, 20.0f, 200.0f);
+        gritEnvOut.prepare (sampleRate, 20.0f, 200.0f);
 
         // EDM extras
         chorus.prepare (spec);
@@ -295,6 +330,8 @@ private:
         robotBand.reset();
         wobbleFilter.reset();
         vocoder.reset();
+        gritEnvIn.reset();
+        gritEnvOut.reset();
         chorus.reset();
         edmLow.reset(); edmMidLo.reset(); edmMidHi.reset(); edmHigh.reset();
         edmEnvLow.reset(); edmEnvMid.reset(); edmEnvHigh.reset();
@@ -351,8 +388,8 @@ private:
     {
         // True channel vocoder (Vocodex-style). The carrier follows held MIDI notes or the
         // vocal's own detected pitch; TUNE transposes it, COLOR sets carrier brightness.
+        // Empty carrier list = keep the last pitch (the vocoder holds it through consonants).
         tmpCarrier = carrierHz;
-        if (tmpCarrier.empty()) tmpCarrier.push_back (110.0f);
         const float shift = std::pow (2.0f, tune / 12.0f);
         for (auto& f : tmpCarrier)
             f = juce::jlimit (40.0f, 1500.0f, f * shift);
@@ -426,24 +463,32 @@ private:
 
     void renderDubstep (juce::AudioBuffer<float>& alignedDry, int numCh, int n, double bpm)
     {
-        // Lightly distorted vocal grit (no pulsing). COLOR = drive amount, TUNE = tone (dark..bright).
+        // Distorted vocal grit (no pulsing). COLOR = drive amount, TUNE = tone (dark..bright).
+        // Presence emphasis into an asymmetric clipper so the character is clearly audible.
         juce::ignoreUnused (bpm);
 
-        const float drive = 1.2f + (color / 100.0f) * 5.0f;
-        const float post  = 0.85f / std::tanh (juce::jmax (drive * 0.7f, 0.6f));
+        const float c01 = color / 100.0f;
+        const float drive = 1.5f + c01 * c01 * 15.0f; // light at low COLOR, aggressive at the top
         const float toneHz = juce::jlimit (1500.0f, 9500.0f, 4500.0f * std::pow (2.0f, tune / 12.0f));
         wobbleFilter.setCutoffFrequency (toneHz);
         wobbleFilter.setResonance (0.6f);
+        robotBand.setCutoffFrequency (2200.0f); // presence band pushed into the clipper
+        robotBand.setResonance (0.9f);
 
         for (int i = 0; i < n; ++i)
         {
             for (int ch = 0; ch < numCh; ++ch)
             {
                 const float x = alignedDry.getSample (ch, i);
-                // Gentle asymmetric soft clip: adds even harmonics for warmth, keeps words intact.
-                float y = std::tanh ((x + 0.12f * x * x) * drive) * post;
+                const float presence = robotBand.processSample (ch, x);
+                float y = std::tanh ((x + 0.2f * x * x + 0.5f * presence) * drive);
                 y = wobbleFilter.processSample (ch, y);
-                wetBuf.getWritePointer (ch)[i] = 0.85f * y + 0.15f * x;
+
+                // Auto level-match so grit changes the tone, not the volume.
+                const float inEnv  = gritEnvIn.process (x);
+                const float outEnv = gritEnvOut.process (y);
+                const float match  = juce::jlimit (0.3f, 3.0f, inEnv / juce::jmax (outEnv, 1.0e-5f));
+                wetBuf.getWritePointer (ch)[i] = y * match;
             }
         }
     }
@@ -457,6 +502,7 @@ private:
     float harmS1 = 4.0f, harmS2 = 7.0f;
     Vocoder vocoder;
     std::vector<float> carrierHz { 110.0f }, tmpCarrier;
+    EnvelopeFollower gritEnvIn, gritEnvOut;
 
     signalsmith::stretch::SignalsmithStretch<float> stretchA, stretchB;
     FixedDelay dryDelay;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(VocalForge VERSION 1.2.1)
+project(VocalForge VERSION 1.2.2)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -61,3 +61,12 @@ target_link_libraries(VocalForge
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
 )
+
+# ---- Offline DSP audio test (not part of the plugin) ----
+option(VOCALFORGE_BUILD_TESTS "Build the offline DSP test" OFF)
+if(VOCALFORGE_BUILD_TESTS)
+    juce_add_console_app(vf_dsptest PRODUCT_NAME "vf_dsptest")
+    target_sources(vf_dsptest PRIVATE test/dsptest.cpp)
+    target_link_libraries(vf_dsptest PRIVATE juce::juce_dsp signalsmith-stretch juce::juce_recommended_config_flags)
+    target_compile_definitions(vf_dsptest PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1)
+endif()
