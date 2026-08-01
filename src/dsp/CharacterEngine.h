@@ -42,8 +42,109 @@ struct FixedDelay
     std::vector<int> idx;
 };
 
+// A classic channel vocoder (Vocodex-style): the vocal's band envelopes shape a
+// synth carrier that follows MIDI notes or the detected vocal pitch.
+struct Vocoder
+{
+    static constexpr int numBands = 16;
+    static constexpr int noiseBandStart = 13; // top bands use noise for consonant clarity
+
+    void prepare (const juce::dsp::ProcessSpec& spec)
+    {
+        sampleRate = spec.sampleRate;
+        juce::dsp::ProcessSpec monoSpec { spec.sampleRate, spec.maximumBlockSize, 1 };
+
+        for (int k = 0; k < numBands; ++k)
+        {
+            const float f = 120.0f * std::pow (7000.0f / 120.0f, (float) k / (float) (numBands - 1));
+            for (auto* filt : { &bandMod[(size_t) k], &bandCar[(size_t) k] })
+            {
+                filt->prepare (monoSpec);
+                filt->setType (juce::dsp::StateVariableTPTFilterType::bandpass);
+                filt->setCutoffFrequency (f);
+                filt->setResonance (5.0f);
+            }
+            env[(size_t) k].prepare (spec.sampleRate, 2.0f, 18.0f);
+        }
+        carrierLP.prepare (monoSpec);
+        carrierLP.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
+        carrierLP.setResonance (0.5f);
+        phases.fill (0.0f);
+        reset();
+    }
+
+    void setCarrier (const std::vector<float>& freqs, float brightness01)
+    {
+        carrierFreqs = freqs;
+        carrierLP.setCutoffFrequency (juce::jmap (brightness01, 2000.0f, 9000.0f));
+    }
+
+    // modulator: time-aligned dry vocal. dest: wet output (all channels get the same signal).
+    void process (const juce::AudioBuffer<float>& modulator, juce::AudioBuffer<float>& dest, int numCh, int n)
+    {
+        const int voices = juce::jmin (3, (int) carrierFreqs.size());
+
+        for (int i = 0; i < n; ++i)
+        {
+            // Mono modulator
+            float mod = 0.0f;
+            for (int ch = 0; ch < numCh; ++ch)
+                mod += modulator.getSample (ch, i);
+            mod /= (float) juce::jmax (1, numCh);
+
+            // Carrier: stacked saws at the target pitches, gently low-passed
+            float car = 0.0f;
+            for (int v = 0; v < voices; ++v)
+            {
+                auto& ph = phases[(size_t) v];
+                ph += carrierFreqs[(size_t) v] / (float) sampleRate;
+                if (ph >= 1.0f) ph -= 1.0f;
+                car += 2.0f * ph - 1.0f;
+            }
+            if (voices > 0) car /= (float) voices;
+            car = carrierLP.processSample (0, car);
+
+            const float noise = rng.nextFloat() * 2.0f - 1.0f;
+
+            float out = 0.0f;
+            for (int k = 0; k < numBands; ++k)
+            {
+                const float m = bandMod[(size_t) k].processSample (0, mod);
+                const float e = env[(size_t) k].process (m);
+                const float source = k >= noiseBandStart ? noise : car;
+                const float s = bandCar[(size_t) k].processSample (0, source);
+                out += s * e;
+            }
+            out *= 4.5f; // makeup
+
+            for (int ch = 0; ch < numCh; ++ch)
+                dest.getWritePointer (ch)[i] = out;
+        }
+    }
+
+    void reset()
+    {
+        for (int k = 0; k < numBands; ++k)
+        {
+            bandMod[(size_t) k].reset();
+            bandCar[(size_t) k].reset();
+            env[(size_t) k].reset();
+        }
+        carrierLP.reset();
+        phases.fill (0.0f);
+    }
+
+    double sampleRate = 44100.0;
+    std::array<juce::dsp::StateVariableTPTFilter<float>, numBands> bandMod, bandCar;
+    std::array<EnvelopeFollower, numBands> env;
+    juce::dsp::StateVariableTPTFilter<float> carrierLP;
+    std::array<float, 3> phases {};
+    std::vector<float> carrierFreqs { 110.0f };
+    juce::Random rng;
+};
+
 // The vocal character section. Modes:
-//   0 Natural | 1 Deep | 2 Robot | 3 Harmony | 4 EDM | 5 Dubstep
+//   0 Natural | 1 Deep | 2 Robot (vocoder) | 3 Harmony | 4 EDM | 5 Dubstep (grit)
 struct CharacterEngine
 {
     enum Mode { Natural = 0, Deep, Robot, Harmony, EDM, Dubstep };
@@ -70,10 +171,13 @@ struct CharacterEngine
         robotBand.setCutoffFrequency (1200.0f);
         robotBand.setResonance (0.4f);
 
-        // Dubstep wobble
+        // Grit tone filter (formerly the dubstep wobble)
         wobbleFilter.prepare (spec);
         wobbleFilter.setType (juce::dsp::StateVariableTPTFilterType::lowpass);
-        wobbleFilter.setResonance (2.2f);
+        wobbleFilter.setResonance (0.6f);
+
+        // Vocoder
+        vocoder.prepare (spec);
 
         // EDM extras
         chorus.prepare (spec);
@@ -100,6 +204,9 @@ struct CharacterEngine
     }
 
     int getLatencySamples() const { return latencySamples; }
+
+    // Carrier pitches for the vocoder (Hz) — held MIDI notes or the detected vocal pitch.
+    void setCarrierHz (const std::vector<float>& freqs) { carrierHz = freqs; }
 
     void setHarmonyOverride (bool active, float semis1, float semis2)
     {
@@ -187,6 +294,7 @@ private:
         dryDelay.reset();
         robotBand.reset();
         wobbleFilter.reset();
+        vocoder.reset();
         chorus.reset();
         edmLow.reset(); edmMidLo.reset(); edmMidHi.reset(); edmHigh.reset();
         edmEnvLow.reset(); edmEnvMid.reset(); edmEnvHigh.reset();
@@ -241,37 +349,16 @@ private:
 
     void renderRobot (juce::AudioBuffer<float>& alignedDry, int numCh, int n)
     {
-        // Ring mod + bit crush + telephone-ish bandpass. Zero-latency source = aligned dry.
-        const float ringHz = 60.0f * std::pow (2.0f, tune / 12.0f);
-        const float phaseInc = ringHz / (float) sampleRate;
+        // True channel vocoder (Vocodex-style). The carrier follows held MIDI notes or the
+        // vocal's own detected pitch; TUNE transposes it, COLOR sets carrier brightness.
+        tmpCarrier = carrierHz;
+        if (tmpCarrier.empty()) tmpCarrier.push_back (110.0f);
+        const float shift = std::pow (2.0f, tune / 12.0f);
+        for (auto& f : tmpCarrier)
+            f = juce::jlimit (40.0f, 1500.0f, f * shift);
 
-        const float crush01 = color / 100.0f;
-        const int   holdSamples = 1 + (int) (crush01 * 7.0f);           // sample-rate reduction
-        const float levels = std::pow (2.0f, juce::jmap (crush01, 12.0f, 5.0f)); // bit depth 12 -> 5
-
-        if ((int) crushHeld.size() < numCh) crushHeld.assign ((size_t) numCh, 0.0f);
-
-        for (int i = 0; i < n; ++i)
-        {
-            const float ring = std::sin (ringPhase * juce::MathConstants<float>::twoPi);
-            ringPhase += phaseInc; if (ringPhase >= 1.0f) ringPhase -= 1.0f;
-
-            const bool holdNew = (crushCounter == 0);
-            if (++crushCounter >= holdSamples) crushCounter = 0;
-
-            for (int ch = 0; ch < numCh; ++ch)
-            {
-                float x = alignedDry.getSample (ch, i);
-                x = x * (0.35f + 0.65f * ring);                       // ring mod (kept partly dry so words survive)
-                if (holdNew) crushHeld[(size_t) ch] = std::round (x * levels) / levels;
-                wetBuf.getWritePointer (ch)[i] = crushHeld[(size_t) ch];
-            }
-        }
-
-        juce::dsp::AudioBlock<float> block (wetBuf.getArrayOfWritePointers(), (size_t) numCh, (size_t) n);
-        juce::dsp::ProcessContextReplacing<float> ctx (block);
-        robotBand.process (ctx);
-        wetBuf.applyGain (2.2f); // bandpass level makeup
+        vocoder.setCarrier (tmpCarrier, color / 100.0f);
+        vocoder.process (alignedDry, wetBuf, numCh, n);
     }
 
     void renderEDM (int numCh, int n)
@@ -339,29 +426,24 @@ private:
 
     void renderDubstep (juce::AudioBuffer<float>& alignedDry, int numCh, int n, double bpm)
     {
-        // Tempo-synced resonant wobble ("wub") + drive. Color picks the rate, Tune moves the growl center.
-        static const float rateMultipliers[] = { 0.25f, 0.5f, 1.0f, 2.0f, 4.0f }; // whole, half, 1/4, 1/8, 1/16 (in beats)
-        const int rateIdx = juce::jlimit (0, 4, (int) std::floor ((color / 100.0f) * 4.999f));
-        const float beatsPerSec = (float) (bpm / 60.0);
-        const float lfoHz = beatsPerSec * rateMultipliers[rateIdx];
-        const float phaseInc = lfoHz / (float) sampleRate;
+        // Lightly distorted vocal grit (no pulsing). COLOR = drive amount, TUNE = tone (dark..bright).
+        juce::ignoreUnused (bpm);
 
-        const float centerHz = 700.0f * std::pow (2.0f, tune / 12.0f);
+        const float drive = 1.2f + (color / 100.0f) * 5.0f;
+        const float post  = 0.85f / std::tanh (juce::jmax (drive * 0.7f, 0.6f));
+        const float toneHz = juce::jlimit (1500.0f, 9500.0f, 4500.0f * std::pow (2.0f, tune / 12.0f));
+        wobbleFilter.setCutoffFrequency (toneHz);
+        wobbleFilter.setResonance (0.6f);
 
         for (int i = 0; i < n; ++i)
         {
-            const float lfo = std::sin (lfoPhase * juce::MathConstants<float>::twoPi);
-            lfoPhase += phaseInc; if (lfoPhase >= 1.0f) lfoPhase -= 1.0f;
-
-            const float cutoff = juce::jlimit (80.0f, 9000.0f, centerHz * std::pow (2.0f, lfo * 2.2f));
-            wobbleFilter.setCutoffFrequency (cutoff);
-
             for (int ch = 0; ch < numCh; ++ch)
             {
-                float x = alignedDry.getSample (ch, i);
-                x = wobbleFilter.processSample (ch, x);
-                x = std::tanh (x * 2.5f) * 0.9f; // growl drive
-                wetBuf.getWritePointer (ch)[i] = x;
+                const float x = alignedDry.getSample (ch, i);
+                // Gentle asymmetric soft clip: adds even harmonics for warmth, keeps words intact.
+                float y = std::tanh ((x + 0.12f * x * x) * drive) * post;
+                y = wobbleFilter.processSample (ch, y);
+                wetBuf.getWritePointer (ch)[i] = 0.85f * y + 0.15f * x;
             }
         }
     }
@@ -373,6 +455,8 @@ private:
     float tune = 0.0f, color = 50.0f;
     bool harmOverride = false;
     float harmS1 = 4.0f, harmS2 = 7.0f;
+    Vocoder vocoder;
+    std::vector<float> carrierHz { 110.0f }, tmpCarrier;
 
     signalsmith::stretch::SignalsmithStretch<float> stretchA, stretchB;
     FixedDelay dryDelay;

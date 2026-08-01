@@ -118,6 +118,16 @@ void VocalForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         setLatencySamples (wantedLatency);
     }
 
+    // ---- Vocoder carrier: held MIDI notes win, else the vocal's own pitch ----
+    {
+        std::vector<float> carrier;
+        for (size_t i = 0; i < heldNotes.size() && i < 3; ++i)
+            carrier.push_back (vf::midiToHz ((float) heldNotes[i]));
+        if (carrier.empty() && voiced && pitchHz > 0.0f)
+            carrier.push_back (pitchHz);
+        character.setCarrierHz (carrier);
+    }
+
     // ---- Chord-follow harmony offsets ----
     if (followMidi && voiced && ! heldNotes.empty())
     {
