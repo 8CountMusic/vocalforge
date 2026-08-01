@@ -1,5 +1,6 @@
 #pragma once
 #include "PluginProcessor.h"
+#include "ui/Visualizer.h"
 
 namespace vfui
 {
@@ -38,7 +39,8 @@ struct Knob : public juce::Component
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> attachment;
 };
 
-class VocalForgeEditor : public juce::AudioProcessorEditor
+class VocalForgeEditor : public juce::AudioProcessorEditor,
+                         private juce::Timer
 {
 public:
     explicit VocalForgeEditor (VocalForgeProcessor&);
@@ -50,8 +52,22 @@ public:
 private:
     struct Section { juce::String title; juce::Rectangle<int> bounds; };
 
+    void timerCallback() override;
+    void showPresetMenu();
+    void showSaveDialog();
+    float eqResponseDb (float freq) const;
+
     VocalForgeProcessor& processor;
     VocalForgeLookAndFeel lnf;
+
+    // Header / presets
+    juce::TextButton presetButton { "Default" };
+    juce::TextButton saveButton { "SAVE" };
+    juce::StringArray userPresetCache;
+
+    // Visualisation
+    vfui::Visualizer visualizer;
+    vfui::StereoMeter meter;
 
     // Clean chain knobs
     std::unique_ptr<Knob> inGain, gateThresh;

@@ -14,7 +14,14 @@ VocalForgeLookAndFeel::VocalForgeLookAndFeel()
     setColour (juce::ComboBox::arrowColourId, accent);
     setColour (juce::PopupMenu::backgroundColourId, panel);
     setColour (juce::PopupMenu::textColourId, textMain);
+    setColour (juce::PopupMenu::headerTextColourId, accentSoft);
     setColour (juce::PopupMenu::highlightedBackgroundColourId, accent.withAlpha (0.25f));
+    setColour (juce::AlertWindow::backgroundColourId, panel);
+    setColour (juce::AlertWindow::textColourId, textMain);
+    setColour (juce::TextEditor::backgroundColourId, background);
+    setColour (juce::TextEditor::textColourId, textMain);
+    setColour (juce::TextEditor::outlineColourId, panelLine);
+    setColour (juce::TextEditor::focusedOutlineColourId, accent);
 }
 
 void VocalForgeLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, int width, int height,
@@ -35,15 +42,18 @@ void VocalForgeLookAndFeel::drawRotarySlider (juce::Graphics& g, int x, int y, i
     g.setColour (panelLine);
     g.strokePath (track, juce::PathStrokeType (arcThickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
-    // Value arc
+    // Value arc with a soft glow
     juce::Path value;
     value.addCentredArc (centre.x, centre.y, arcRadius, arcRadius, 0.0f, startAngle, angle, true);
+    g.setColour (accent.withAlpha (0.25f));
+    g.strokePath (value, juce::PathStrokeType (arcThickness * 2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
     g.setColour (accent);
     g.strokePath (value, juce::PathStrokeType (arcThickness, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
 
     // Body
     const float bodyRadius = radius - arcThickness * 2.2f;
-    g.setColour (panel.brighter (0.10f));
+    g.setGradientFill (juce::ColourGradient (panel.brighter (0.18f), centre.x, centre.y - bodyRadius,
+                                             panel.brighter (0.04f), centre.x, centre.y + bodyRadius, false));
     g.fillEllipse (centre.x - bodyRadius, centre.y - bodyRadius, bodyRadius * 2.0f, bodyRadius * 2.0f);
     g.setColour (panelLine.brighter (0.1f));
     g.drawEllipse (centre.x - bodyRadius, centre.y - bodyRadius, bodyRadius * 2.0f, bodyRadius * 2.0f, 1.0f);
@@ -99,8 +109,7 @@ void VocalForgeLookAndFeel::drawComboBox (juce::Graphics& g, int width, int heig
 Knob::Knob (juce::AudioProcessorValueTreeState& apvts, const juce::String& paramID, const juce::String& caption)
 {
     slider.setSliderStyle (juce::Slider::RotaryHorizontalVerticalDrag);
-    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 68, 14);
-    slider.setNumDecimalPlacesToDisplay (1);
+    slider.setTextBoxStyle (juce::Slider::TextBoxBelow, false, 78, 14);
     addAndMakeVisible (slider);
 
     label.setText (caption, juce::dontSendNotification);
@@ -187,12 +196,129 @@ VocalForgeEditor::VocalForgeEditor (VocalForgeProcessor& p)
     dlySyncLabel.setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::bold)));
     addAndMakeVisible (dlySyncLabel);
 
-    setSize (980, 620);
+    // Header: presets
+    presetButton.setButtonText (processor.presets.getCurrentName());
+    presetButton.onClick = [this] { showPresetMenu(); };
+    addAndMakeVisible (presetButton);
+
+    saveButton.onClick = [this] { showSaveDialog(); };
+    addAndMakeVisible (saveButton);
+
+    // Visualiser + meter
+    visualizer.getEqResponseDb = [this] (float freq) { return eqResponseDb (freq); };
+    addAndMakeVisible (visualizer);
+    addAndMakeVisible (meter);
+
+    startTimerHz (30);
+    setSize (1024, 780);
 }
 
 VocalForgeEditor::~VocalForgeEditor()
 {
+    stopTimer();
     setLookAndFeel (nullptr);
+}
+
+//==============================================================================
+void VocalForgeEditor::timerCallback()
+{
+    if (processor.scopeReady.load())
+    {
+        visualizer.pushFrame (processor.scopeData, processor.getSampleRate());
+        processor.scopeReady.store (false);
+    }
+
+    const float pl = processor.outputPeak[0].exchange (0.0f);
+    const float pr = processor.outputPeak[1].exchange (0.0f);
+    meter.update (pl, pr);
+}
+
+float VocalForgeEditor::eqResponseDb (float freq) const
+{
+    using Coefs = juce::dsp::IIR::Coefficients<float>;
+    double sr = processor.getSampleRate();
+    if (sr < 1000.0) sr = 48000.0;
+
+    auto get = [this] (const char* id) { return processor.apvts.getRawParameterValue (id)->load(); };
+
+    const auto hpf   = Coefs::makeHighPass  (sr, juce::jlimit (20.0f, 400.0f, get (ParamID::hpfFreq)), 0.707f);
+    const auto cut   = Coefs::makePeakFilter (sr, juce::jlimit (100.0f, 8000.0f, get (ParamID::cutFreq)),
+                                              juce::jlimit (0.5f, 8.0f, get (ParamID::cutQ)),
+                                              juce::Decibels::decibelsToGain (juce::jmin (get (ParamID::cutGain), 0.0f)));
+    const auto harsh = Coefs::makePeakFilter (sr, 3500.0f, 1.4f,
+                                              juce::Decibels::decibelsToGain (juce::jmin (get (ParamID::harshGain), 0.0f)));
+    const auto air   = Coefs::makeHighShelf (sr, 12000.0f, 0.707f,
+                                             juce::Decibels::decibelsToGain (juce::jmax (get (ParamID::airGain), 0.0f)));
+
+    double mag = 1.0;
+    for (const auto& c : { hpf, cut, harsh, air })
+        mag *= c->getMagnitudeForFrequency ((double) freq, sr);
+
+    return (float) juce::Decibels::gainToDecibels (mag, -60.0);
+}
+
+void VocalForgeEditor::showPresetMenu()
+{
+    userPresetCache = processor.presets.getUserPresetNames();
+
+    juce::PopupMenu m;
+    m.setLookAndFeel (&lnf);
+    m.addSectionHeader ("FACTORY");
+    const auto& factory = vf::getFactoryPresets();
+    for (int i = 0; i < (int) factory.size(); ++i)
+        m.addItem (1 + i, factory[(size_t) i].name);
+
+    if (! userPresetCache.isEmpty())
+    {
+        m.addSeparator();
+        m.addSectionHeader ("USER");
+        for (int i = 0; i < userPresetCache.size(); ++i)
+            m.addItem (1000 + i, userPresetCache[i]);
+    }
+
+    m.addSeparator();
+    m.addItem (9000, "Save current as...");
+
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (presetButton),
+        [this] (int result)
+        {
+            if (result == 0) return;
+            if (result == 9000) { showSaveDialog(); return; }
+
+            if (result >= 1000)
+            {
+                const int idx = result - 1000;
+                if (idx < userPresetCache.size())
+                    processor.presets.loadUserPreset (userPresetCache[idx]);
+            }
+            else
+            {
+                processor.presets.applyFactoryPreset (result - 1);
+            }
+            presetButton.setButtonText (processor.presets.getCurrentName());
+        });
+}
+
+void VocalForgeEditor::showSaveDialog()
+{
+    auto* aw = new juce::AlertWindow ("Save Preset", "Name your preset:", juce::MessageBoxIconType::NoIcon);
+    aw->addTextEditor ("name", processor.presets.getCurrentName());
+    aw->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
+    aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
+    aw->setLookAndFeel (&lnf);
+
+    aw->enterModalState (true,
+        juce::ModalCallbackFunction::create ([this, aw] (int result)
+        {
+            if (result == 1)
+            {
+                const auto name = aw->getTextEditorContents ("name");
+                if (processor.presets.saveUserPreset (name))
+                    presetButton.setButtonText (processor.presets.getCurrentName());
+            }
+            aw->setLookAndFeel (nullptr);
+        }),
+        true); // delete when dismissed
 }
 
 void VocalForgeEditor::updateModeButtons (float denormalisedValue)
@@ -202,9 +328,12 @@ void VocalForgeEditor::updateModeButtons (float denormalisedValue)
         modeButtons[i]->setToggleState (i == idx, juce::dontSendNotification);
 }
 
+//==============================================================================
 void VocalForgeEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (background);
+    g.setGradientFill (juce::ColourGradient (background.brighter (0.04f), 0.0f, 0.0f,
+                                             background.darker (0.15f), 0.0f, (float) getHeight(), false));
+    g.fillAll();
 
     // Header
     g.setColour (textMain);
@@ -234,14 +363,29 @@ void VocalForgeEditor::resized()
     sections.clear();
 
     auto area = getLocalBounds().reduced (16);
-    area.removeFromTop (52); // header
+
+    // ---------- Header ----------
+    auto header = area.removeFromTop (52);
+    auto presetArea = header.removeFromRight (300).withSizeKeepingCentre (300, 32);
+    saveButton.setBounds (presetArea.removeFromRight (68));
+    presetArea.removeFromRight (8);
+    presetButton.setBounds (presetArea);
+
+    area.removeFromTop (6);
+
+    // ---------- Visualiser strip ----------
+    auto visRow = area.removeFromTop (150);
+    meter.setBounds (visRow.removeFromRight (120));
+    visRow.removeFromRight (10);
+    visualizer.setBounds (visRow);
+
+    area.removeFromTop (12);
 
     const int gap = 10;
-    const int knobH = 96;
     const int titleH = 28;
 
     // ---------- Row 1: cleanup chain ----------
-    auto row1 = area.removeFromTop (titleH + knobH * 2 + 14);
+    auto row1 = area.removeFromTop (236);
 
     auto placeGrid = [&] (juce::Rectangle<int> panelArea, const juce::String& title,
                           std::initializer_list<Knob*> knobs, int columns)
@@ -263,8 +407,8 @@ void VocalForgeEditor::resized()
 
     auto r1 = row1;
     auto inputPanel = r1.removeFromLeft (120); r1.removeFromLeft (gap);
-    auto eqPanel    = r1.removeFromLeft (300); r1.removeFromLeft (gap);
-    auto dynPanel   = r1.removeFromLeft (300); r1.removeFromLeft (gap);
+    auto eqPanel    = r1.removeFromLeft (356); r1.removeFromLeft (gap);
+    auto dynPanel   = r1.removeFromLeft (356); r1.removeFromLeft (gap);
     auto tonePanel  = r1;
 
     placeGrid (inputPanel, "INPUT",    { inGain.get(), gateThresh.get() }, 1);

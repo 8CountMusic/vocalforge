@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "Params.h"
+#include "Presets.h"
 #include "dsp/CleanupChain.h"
 #include "dsp/CharacterEngine.h"
 #include "dsp/Space.h"
@@ -35,8 +36,34 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     juce::AudioProcessorValueTreeState apvts;
+    vf::PresetManager presets { apvts };
+
+    // ---- Visualisation taps (read by the editor) ----
+    static constexpr int fftOrder = 11;
+    static constexpr int fftSize  = 1 << fftOrder; // 2048
+
+    std::array<std::atomic<float>, 2> outputPeak { 0.0f, 0.0f };
+    std::array<float, fftSize> scopeData {};
+    std::atomic<bool> scopeReady { false };
 
 private:
+    void pushScopeSample (float s)
+    {
+        scopeFifo[(size_t) scopeIdx] = s;
+        if (++scopeIdx >= fftSize)
+        {
+            scopeIdx = 0;
+            if (! scopeReady.load())
+            {
+                scopeData = scopeFifo;
+                scopeReady.store (true);
+            }
+        }
+    }
+
+    std::array<float, fftSize> scopeFifo {};
+    int scopeIdx = 0;
+
     float getParam (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
 
     vf::CleanupChain cleanup;

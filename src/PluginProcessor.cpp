@@ -82,6 +82,28 @@ void VocalForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
         for (int i = 0; i < buffer.getNumSamples(); ++i)
             d[i] = juce::jlimit (-1.5f, 1.5f, d[i]);
     }
+
+    // ---- Feed the editor's meters and spectrum analyser ----
+    const int numCh = buffer.getNumChannels();
+    const int n     = buffer.getNumSamples();
+
+    for (int ch = 0; ch < juce::jmin (2, numCh); ++ch)
+    {
+        const float blockPeak = buffer.getMagnitude (ch, 0, n);
+        float current = outputPeak[(size_t) ch].load();
+        if (blockPeak > current)
+            outputPeak[(size_t) ch].store (blockPeak);
+    }
+    if (numCh == 1)
+        outputPeak[1].store (outputPeak[0].load());
+
+    for (int i = 0; i < n; ++i)
+    {
+        float mono = 0.0f;
+        for (int ch = 0; ch < numCh; ++ch)
+            mono += buffer.getSample (ch, i);
+        pushScopeSample (mono / (float) juce::jmax (1, numCh));
+    }
 }
 
 void VocalForgeProcessor::getStateInformation (juce::MemoryBlock& destData)

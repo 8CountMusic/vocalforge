@@ -26,6 +26,12 @@ The code has to be compiled once for your machine (Windows or Mac). The easiest 
 
 Then in Reaper: Options → Preferences → Plug-ins → VST → **Re-scan**. Insert "VocalForge" on your vocal track.
 
+## Presets
+
+The menu at the top-right holds factory presets (Clean & Tight, Radio Ready, Trailer Voice, Monster, Cyborg, Broken Android, Choir Stack, Psy Alien, Festival Lead, Wub Machine, Growl Bass) plus your own: hit **SAVE** or "Save current as..." and it's stored in `Documents/VocalForge Presets` and appears in the menu under USER.
+
+The top strip shows the live output spectrum with your EQ curve drawn over it, and stereo output meters with peak hold.
+
 ## The controls
 
 **Signal flow:** Input → Gate → EQ → De-esser → Compressor → Saturation → Parallel comp → Character → Reverb/Delay → Output.
