@@ -26,11 +26,11 @@ FetchContent_MakeAvailable(signalsmith-stretch)
 
 juce_add_plugin(VocalForge
     COMPANY_NAME "8 Count Music"
-    BUNDLE_ID com.8countmusic.vocalforge
+    BUNDLE_ID com.8countmusic.vocalforge11
     PLUGIN_MANUFACTURER_CODE Ecmu
-    PLUGIN_CODE Vfrg
+    PLUGIN_CODE Vf11
     FORMATS VST3 Standalone
-    PRODUCT_NAME "VocalForge"
+    PRODUCT_NAME "VocalForge 1.1"
     VST3_CATEGORIES Fx
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
