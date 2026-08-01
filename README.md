@@ -32,6 +32,13 @@ The menu at the top-right holds factory presets (Clean & Tight, Radio Ready, Tra
 
 The top strip shows the live output spectrum with your EQ curve drawn over it, and stereo output meters with peak hold.
 
+## Tune + MIDI (v1.2)
+
+- **TUNE** — autotune. Pick KEY and SCALE, then SPEED sets the style: high = instant hard-tune robot snap, low = gentle correction. AMOUNT scales how far it pulls.
+- **MIDI FOLLOW** — send MIDI notes to the VocalForge track (route a keyboard or MIDI item to it in Reaper) and the tuner snaps the vocal to exactly the notes you hold; in Harmony mode the harmony voices follow your held chord instead of fixed intervals.
+- **MIDI OUT** — the plugin detects the vocal's pitch and emits it as MIDI notes. In Reaper, add a receive on a synth track from the VocalForge track (MIDI), and the synth plays the vocal melody — instant doubling layers.
+- The PITCH display shows detected note → target note in real time.
+
 ## The controls
 
 **Signal flow:** Input → Gate → EQ → De-esser → Compressor → Saturation → Parallel comp → Character → Reverb/Delay → Output.

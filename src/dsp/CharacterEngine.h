@@ -101,6 +101,13 @@ struct CharacterEngine
 
     int getLatencySamples() const { return latencySamples; }
 
+    void setHarmonyOverride (bool active, float semis1, float semis2)
+    {
+        harmOverride = active;
+        harmS1 = juce::jlimit (-24.0f, 24.0f, semis1);
+        harmS2 = juce::jlimit (-24.0f, 24.0f, semis2);
+    }
+
     void setParams (int modeIn, float amount01, float tuneSemis, float color01)
     {
         if (modeIn != mode)
@@ -214,9 +221,12 @@ private:
     void renderHarmony (juce::AudioBuffer<float>& alignedDry, int numCh, int n)
     {
         // Two harmony voices above the lead (default: major 3rd + 5th), tucked under the dry.
+        // With MIDI follow active, the offsets come from the held chord instead.
+        const float s1 = harmOverride ? harmS1 : tune + 4.0f;
+        const float s2 = harmOverride ? harmS2 : tune + 7.0f;
         v2Buf.setSize (numCh, n, false, false, true);
-        runStretch (stretchA, tune + 4.0f, 0.0f, wetBuf, numCh, n);
-        runStretch (stretchB, tune + 7.0f, 0.0f, v2Buf, numCh, n);
+        runStretch (stretchA, s1, 0.0f, wetBuf, numCh, n);
+        runStretch (stretchB, s2, 0.0f, v2Buf, numCh, n);
 
         const float voiceLevel = 0.35f + (color / 100.0f) * 0.45f;
         for (int ch = 0; ch < numCh; ++ch)
@@ -361,6 +371,8 @@ private:
     int mode = Natural;
     bool needsReset = false;
     float tune = 0.0f, color = 50.0f;
+    bool harmOverride = false;
+    float harmS1 = 4.0f, harmS2 = 7.0f;
 
     signalsmith::stretch::SignalsmithStretch<float> stretchA, stretchB;
     FixedDelay dryDelay;

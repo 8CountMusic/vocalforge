@@ -4,6 +4,7 @@
 #include "Presets.h"
 #include "dsp/CleanupChain.h"
 #include "dsp/CharacterEngine.h"
+#include "dsp/PitchEngine.h"
 #include "dsp/Space.h"
 
 class VocalForgeProcessor : public juce::AudioProcessor
@@ -21,8 +22,8 @@ public:
     bool hasEditor() const override { return true; }
 
     const juce::String getName() const override { return "VocalForge"; }
-    bool acceptsMidi() const override  { return false; }
-    bool producesMidi() const override { return false; }
+    bool acceptsMidi() const override  { return true; }
+    bool producesMidi() const override { return true; }
     bool isMidiEffect() const override { return false; }
     double getTailLengthSeconds() const override { return 3.0; }
 
@@ -45,6 +46,10 @@ public:
     std::array<std::atomic<float>, 2> outputPeak { 0.0f, 0.0f };
     std::array<float, fftSize> scopeData {};
     std::atomic<bool> scopeReady { false };
+
+    // Pitch readout for the editor (Hz; 0 = none)
+    std::atomic<float> detectedPitchHz { 0.0f };
+    std::atomic<float> targetPitchHz { 0.0f };
 
 private:
     void pushScopeSample (float s)
@@ -69,6 +74,12 @@ private:
     vf::CleanupChain cleanup;
     vf::CharacterEngine character;
     vf::SpaceSection space;
+    vf::YinDetector detector;
+    vf::AutoTune autoTune;
+    vf::MidiNoteTracker midiTracker;
+    std::vector<int> heldNotes;
+    juce::AudioBuffer<float> detectorMono;
+    int lastReportedLatency = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VocalForgeProcessor)
 };

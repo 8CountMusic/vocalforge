@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(VocalForge VERSION 1.1.0)
+project(VocalForge VERSION 1.2.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,15 +26,15 @@ FetchContent_MakeAvailable(signalsmith-stretch)
 
 juce_add_plugin(VocalForge
     COMPANY_NAME "8 Count Music"
-    BUNDLE_ID com.8countmusic.vocalforge11
+    BUNDLE_ID com.8countmusic.vocalforge12
     PLUGIN_MANUFACTURER_CODE Ecmu
-    PLUGIN_CODE Vf11
+    PLUGIN_CODE Vf12
     FORMATS VST3 Standalone
-    PRODUCT_NAME "VocalForge 1.1"
+    PRODUCT_NAME "VocalForge 1.2"
     VST3_CATEGORIES Fx
     IS_SYNTH FALSE
-    NEEDS_MIDI_INPUT FALSE
-    NEEDS_MIDI_OUTPUT FALSE
+    NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT TRUE
     COPY_PLUGIN_AFTER_BUILD FALSE
 )
 

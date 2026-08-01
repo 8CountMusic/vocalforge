@@ -69,6 +69,26 @@ private:
     vfui::Visualizer visualizer;
     vfui::StereoMeter meter;
 
+    // Pitch readout (detected note -> target note)
+    struct PitchDisplay : public juce::Component
+    {
+        void update (float detHz, float tgtHz)
+        {
+            if (detHz != det || tgtHz != tgt) { det = detHz; tgt = tgtHz; repaint(); }
+        }
+        void paint (juce::Graphics& g) override;
+        float det = 0.0f, tgt = 0.0f;
+    };
+    PitchDisplay pitchDisplay;
+
+    // Tune section
+    juce::TextButton tuneOnButton { "TUNE" }, midiFollowButton { "MIDI FOLLOW" }, midiOutButton { "MIDI OUT" };
+    juce::ComboBox keyBox, scaleBox;
+    juce::Label keyLabel, scaleLabel;
+    std::unique_ptr<Knob> tuneSpeed, tuneAmount;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> tuneOnAtt, midiFollowAtt, midiOutAtt;
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ComboBoxAttachment> keyAtt, scaleAtt;
+
     // Clean chain knobs
     std::unique_ptr<Knob> inGain, gateThresh;
     std::unique_ptr<Knob> hpfFreq, cutFreq, cutGain, cutQ, harshGain, airGain;

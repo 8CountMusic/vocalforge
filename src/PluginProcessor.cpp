@@ -25,12 +25,35 @@ void VocalForgeProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     cleanup.prepare (spec);
     character.prepare (spec);
     space.prepare (spec);
-    setLatencySamples (character.getLatencySamples());
+    detector.prepare (sampleRate);
+    autoTune.prepare (spec);
+    lastReportedLatency = character.getLatencySamples();
+    setLatencySamples (lastReportedLatency);
 }
 
-void VocalForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void VocalForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    // ---- Collect held MIDI notes (for tune targeting / chord-follow harmony) ----
+    for (const auto meta : midiMessages)
+    {
+        const auto m = meta.getMessage();
+        if (m.isNoteOn())
+        {
+            if (std::find (heldNotes.begin(), heldNotes.end(), m.getNoteNumber()) == heldNotes.end())
+                heldNotes.push_back (m.getNoteNumber());
+            std::sort (heldNotes.begin(), heldNotes.end());
+        }
+        else if (m.isNoteOff())
+        {
+            heldNotes.erase (std::remove (heldNotes.begin(), heldNotes.end(), m.getNoteNumber()), heldNotes.end());
+        }
+        else if (m.isAllNotesOff() || m.isAllSoundOff())
+        {
+            heldNotes.clear();
+        }
+    }
 
     for (int ch = getTotalNumInputChannels(); ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear (ch, 0, buffer.getNumSamples());
@@ -60,6 +83,53 @@ void VocalForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
                        getParam (ParamID::satDrive) / 100.0f,
                        getParam (ParamID::parAmount) / 100.0f);
     cleanup.process (buffer);
+
+    // ---- Pitch detection (feeds tune, chord-follow harmony, MIDI out, and the UI) ----
+    {
+        const int n = buffer.getNumSamples();
+        const int numCh = buffer.getNumChannels();
+        detectorMono.setSize (1, n, false, false, true);
+        detectorMono.clear();
+        for (int ch = 0; ch < numCh; ++ch)
+            detectorMono.addFrom (0, 0, buffer, ch, 0, n, 1.0f / (float) juce::jmax (1, numCh));
+        detector.push (detectorMono.getReadPointer (0), n);
+    }
+    const float pitchHz = detector.getHz();
+    const bool voiced = detector.isVoiced();
+    detectedPitchHz.store (voiced ? pitchHz : 0.0f);
+
+    // ---- Autotune ----
+    const bool followMidi = getParam (ParamID::midiFollow) > 0.5f;
+    autoTune.setParams (getParam (ParamID::tuneOn) > 0.5f,
+                        (int) getParam (ParamID::tuneKey),
+                        (int) getParam (ParamID::tuneScale),
+                        getParam (ParamID::tuneSpeed) / 100.0f,
+                        getParam (ParamID::tuneAmount) / 100.0f,
+                        followMidi);
+    autoTune.setHeldNotes (heldNotes);
+    targetPitchHz.store (autoTune.process (buffer, pitchHz, voiced));
+
+    // Report latency changes when tune toggles on/off
+    const int wantedLatency = character.getLatencySamples()
+                              + (autoTune.isOn() ? autoTune.getLatencySamples() : 0);
+    if (wantedLatency != lastReportedLatency)
+    {
+        lastReportedLatency = wantedLatency;
+        setLatencySamples (wantedLatency);
+    }
+
+    // ---- Chord-follow harmony offsets ----
+    if (followMidi && voiced && ! heldNotes.empty())
+    {
+        const float base = vf::hzToMidi (pitchHz);
+        const float s1 = (float) heldNotes[0] - base;
+        const float s2 = heldNotes.size() > 1 ? (float) heldNotes[1] - base : s1 + 12.0f;
+        character.setHarmonyOverride (true, s1, s2);
+    }
+    else
+    {
+        character.setHarmonyOverride (false, 0.0f, 0.0f);
+    }
 
     character.setParams ((int) getParam (ParamID::charMode),
                          getParam (ParamID::charAmount) / 100.0f,
@@ -104,6 +174,13 @@ void VocalForgeProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
             mono += buffer.getSample (ch, i);
         pushScopeSample (mono / (float) juce::jmax (1, numCh));
     }
+
+    // ---- MIDI out: detected vocal pitch as notes for other plugins ----
+    midiMessages.clear();
+    if (getParam (ParamID::midiOut) > 0.5f)
+        midiTracker.process (midiMessages, pitchHz, voiced, outputPeak[0].load());
+    else
+        midiTracker.allNotesOff (midiMessages);
 }
 
 void VocalForgeProcessor::getStateInformation (juce::MemoryBlock& destData)

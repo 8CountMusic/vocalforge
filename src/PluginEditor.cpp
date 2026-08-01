@@ -209,8 +209,42 @@ VocalForgeEditor::VocalForgeEditor (VocalForgeProcessor& p)
     addAndMakeVisible (visualizer);
     addAndMakeVisible (meter);
 
+    // ---- Tune section ----
+    auto setupToggle = [this] (juce::TextButton& b,
+                               std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment>& att,
+                               const char* paramID)
+    {
+        b.setClickingTogglesState (true);
+        addAndMakeVisible (b);
+        att = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (processor.apvts, paramID, b);
+    };
+    setupToggle (tuneOnButton,     tuneOnAtt,     ParamID::tuneOn);
+    setupToggle (midiFollowButton, midiFollowAtt, ParamID::midiFollow);
+    setupToggle (midiOutButton,    midiOutAtt,    ParamID::midiOut);
+
+    keyBox.addItemList ({ "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 1);
+    scaleBox.addItemList ({ "CHROMATIC", "MAJOR", "MINOR" }, 1);
+    addAndMakeVisible (keyBox);
+    addAndMakeVisible (scaleBox);
+    keyAtt   = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, ParamID::tuneKey, keyBox);
+    scaleAtt = std::make_unique<juce::AudioProcessorValueTreeState::ComboBoxAttachment> (processor.apvts, ParamID::tuneScale, scaleBox);
+
+    for (auto* l : { &keyLabel, &scaleLabel })
+    {
+        l->setJustificationType (juce::Justification::centredLeft);
+        l->setFont (juce::Font (juce::FontOptions (11.5f, juce::Font::bold)));
+        addAndMakeVisible (*l);
+    }
+    keyLabel.setText ("KEY", juce::dontSendNotification);
+    scaleLabel.setText ("SCALE", juce::dontSendNotification);
+
+    makeKnob (tuneSpeed,  ParamID::tuneSpeed,  "SPEED");
+    makeKnob (tuneAmount, ParamID::tuneAmount, "AMOUNT");
+
+    addAndMakeVisible (pitchDisplay);
+
     startTimerHz (30);
-    setSize (1024, 780);
+    setSize (1024, 906);
 }
 
 VocalForgeEditor::~VocalForgeEditor()
@@ -231,6 +265,38 @@ void VocalForgeEditor::timerCallback()
     const float pl = processor.outputPeak[0].exchange (0.0f);
     const float pr = processor.outputPeak[1].exchange (0.0f);
     meter.update (pl, pr);
+
+    pitchDisplay.update (processor.detectedPitchHz.load(), processor.targetPitchHz.load());
+}
+
+void VocalForgeEditor::PitchDisplay::paint (juce::Graphics& g)
+{
+    auto r = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (juce::Colour (0xff11141b));
+    g.fillRoundedRectangle (r, 8.0f);
+
+    auto noteName = [] (float hz) -> juce::String
+    {
+        if (hz <= 0.0f) return "--";
+        static const char* names[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+        const float midi = 69.0f + 12.0f * std::log2 (hz / 440.0f);
+        const int m = (int) std::round (midi);
+        if (m < 0 || m > 127) return "--";
+        return juce::String (names[m % 12]) + juce::String (m / 12 - 1);
+    };
+
+    g.setColour (textDim);
+    g.setFont (juce::Font (juce::FontOptions (10.0f, juce::Font::bold)));
+    g.drawText ("PITCH", 10, 6, 60, 12, juce::Justification::left);
+
+    const bool active = det > 0.0f;
+    g.setColour (active ? textMain : textDim.withAlpha (0.5f));
+    g.setFont (juce::Font (juce::FontOptions (24.0f, juce::Font::bold)));
+
+    juce::String text = noteName (det);
+    if (tgt > 0.0f)
+        text += "  >  " + noteName (tgt);
+    g.drawText (text, getLocalBounds().reduced (8).withTrimmedTop (10), juce::Justification::centred);
 }
 
 float VocalForgeEditor::eqResponseDb (float freq) const
@@ -383,6 +449,36 @@ void VocalForgeEditor::resized()
 
     const int gap = 10;
     const int titleH = 28;
+
+    // ---------- Tune row ----------
+    auto tuneRow = area.removeFromTop (114);
+    sections.push_back ({ "TUNE", tuneRow });
+    {
+        auto inner = tuneRow.reduced (10);
+        inner.removeFromTop (titleH - 10);
+
+        auto mid = inner.withSizeKeepingCentre (inner.getWidth(), 32);
+        auto left = mid;
+
+        tuneOnButton.setBounds (left.removeFromLeft (76)); left.removeFromLeft (12);
+        keyLabel.setBounds (left.removeFromLeft (30));
+        keyBox.setBounds (left.removeFromLeft (64).reduced (0, 1)); left.removeFromLeft (12);
+        scaleLabel.setBounds (left.removeFromLeft (44));
+        scaleBox.setBounds (left.removeFromLeft (110).reduced (0, 1)); left.removeFromLeft (16);
+
+        // Knobs get taller bounds than the button strip
+        auto knobArea = juce::Rectangle<int> (left.getX(), inner.getY(), 190, inner.getHeight());
+        tuneSpeed ->setBounds (knobArea.removeFromLeft (95));
+        tuneAmount->setBounds (knobArea);
+        left.removeFromLeft (200);
+
+        midiFollowButton.setBounds (left.removeFromLeft (110)); left.removeFromLeft (10);
+        midiOutButton.setBounds (left.removeFromLeft (92)); left.removeFromLeft (12);
+
+        pitchDisplay.setBounds (juce::Rectangle<int> (left.getX(), inner.getY(), left.getWidth(), inner.getHeight()));
+    }
+
+    area.removeFromTop (gap);
 
     // ---------- Row 1: cleanup chain ----------
     auto row1 = area.removeFromTop (236);

@@ -41,6 +41,15 @@ namespace ParamID
     inline constexpr auto charTune    = "charTune";   // mode-specific pitch-ish control
     inline constexpr auto charColor   = "charColor";  // mode-specific tone/texture control
 
+    // Tune / MIDI
+    inline constexpr auto tuneOn      = "tuneOn";
+    inline constexpr auto tuneKey     = "tuneKey";    // C..B
+    inline constexpr auto tuneScale   = "tuneScale";  // Chromatic, Major, Minor
+    inline constexpr auto tuneSpeed   = "tuneSpeed";
+    inline constexpr auto tuneAmount  = "tuneAmount";
+    inline constexpr auto midiFollow  = "midiFollow"; // held notes steer tune + harmony
+    inline constexpr auto midiOut     = "midiOut";    // detected pitch emitted as MIDI
+
     // Space
     inline constexpr auto rvbMix      = "rvbMix";
     inline constexpr auto rvbSize     = "rvbSize";
@@ -105,6 +114,18 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     params.push_back (std::make_unique<P> (juce::ParameterID { ParamID::charAmount, 1 }, "Amount", Range (0.0f, 100.0f, 1.0f),  100.0f, pct));
     params.push_back (std::make_unique<P> (juce::ParameterID { ParamID::charTune, 1 },   "Tune",   Range (-12.0f, 12.0f, 0.1f), 0.0f, semi));
     params.push_back (std::make_unique<P> (juce::ParameterID { ParamID::charColor, 1 },  "Color",  Range (0.0f, 100.0f, 1.0f),  50.0f, pct));
+
+    // Tune / MIDI
+    using Pb = juce::AudioParameterBool;
+    params.push_back (std::make_unique<Pb> (juce::ParameterID { ParamID::tuneOn, 1 }, "Tune", false));
+    params.push_back (std::make_unique<Pc> (juce::ParameterID { ParamID::tuneKey, 1 }, "Key",
+                                            juce::StringArray { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" }, 0));
+    params.push_back (std::make_unique<Pc> (juce::ParameterID { ParamID::tuneScale, 1 }, "Scale",
+                                            juce::StringArray { "Chromatic", "Major", "Minor" }, 1));
+    params.push_back (std::make_unique<P> (juce::ParameterID { ParamID::tuneSpeed, 1 },  "Speed",  Range (0.0f, 100.0f, 1.0f), 70.0f, pct));
+    params.push_back (std::make_unique<P> (juce::ParameterID { ParamID::tuneAmount, 1 }, "Amount", Range (0.0f, 100.0f, 1.0f), 100.0f, pct));
+    params.push_back (std::make_unique<Pb> (juce::ParameterID { ParamID::midiFollow, 1 }, "MIDI Follow", false));
+    params.push_back (std::make_unique<Pb> (juce::ParameterID { ParamID::midiOut, 1 },    "MIDI Out",    false));
 
     // Space
     params.push_back (std::make_unique<P> (juce::ParameterID { ParamID::rvbMix, 1 },  "Reverb",   Range (0.0f, 100.0f, 1.0f), 15.0f, pct));
